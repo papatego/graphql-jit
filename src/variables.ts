@@ -140,6 +140,10 @@ export function compileVariableParsing(
       current[path[path.length - 1]] = value;
     }
 
+    function isObject(o) {
+      return o != null && typeof o === "object" && !Array.isArray(o);
+    }
+
     ${Array.from(hoistedFunctions)
       .map(([, value]) => value)
       .join("\n")}
@@ -387,6 +391,9 @@ function compileInputListType(
   useInputPath: boolean,
   useResponsePath: boolean
 ) {
+  const inputPath = useInputPath
+    ? `inputPath`
+    : pathToExpression(context.inputPath);
   const responsePath = useResponsePath
     ? "responsePath"
     : pathToExpression(context.responsePath);
@@ -405,26 +412,31 @@ function compileInputListType(
   subContext.inputPath = addPath(subContext.inputPath, index, "variable");
   subContext.depth++;
 
-  const nextInputPath = useInputPath
-    ? `getPath(input, inputPath)[${index}]`
-    : getObjectPath(context.inputPath);
-
   gen(`
     if (Array.isArray(${currentInput})) {
       setPath(coerced, ${responsePath}, []);
+      const previousInputPath = ${inputPath};
+      const previousResponsePath = ${responsePath};
       for (let ${index} = 0; ${index} < ${currentInput}.length; ++${index}) {
-        const ${hasValueName} =
-        ${nextInputPath} !== undefined;
+        const inputPath = previousInputPath.concat(${index});
+        const responsePath = previousResponsePath.concat(${index});
+
+        const __inputListValue = getPath(input, inputPath);
+
+        if (isObject(__inputListValue)) {
+          visitedInputValues.add(__inputListValue);
+        }
+
+        const ${hasValueName} = __inputListValue !== undefined;
+
         ${generateInput(
           subContext,
           varType.ofType,
           varName,
           hasValueName,
           false,
-          // TODO(boopathi): Investigate a bit more
-          // why we cannot forward useInputPath, and useResponsePath
-          false,
-          false
+          useInputPath,
+          useResponsePath
         )}
       }
     } else {
@@ -434,10 +446,8 @@ function compileInputListType(
         varName,
         hasValueName,
         true,
-        // TODO(boopathi): Investigate a bit more
-        // why we cannot forward useInputPath, and useResponsePath
-        false,
-        false
+        useInputPath,
+        useResponsePath
       )}
     }
   `);
@@ -500,6 +510,9 @@ function compileInputObjectType(
       ? `responsePath.concat("${field.name}")`
       : pathToExpression(subContext.responsePath);
 
+    const previousIndices = context.depth > 1 ? `indices` : `[]`;
+    const nextIndex = context.depth > 1 ? `idx${context.depth - 1}` : "";
+
     gen(`
       ${varTypeParserName}(
         input,
@@ -507,7 +520,9 @@ function compileInputObjectType(
         coerced,
         ${nextResponsePath},
         errors,
-        ${hasValueName}
+        ${hasValueName},
+        ...${previousIndices},
+        ${nextIndex}
       );
     `);
 
@@ -516,8 +531,17 @@ function compileInputObjectType(
       context.hoistedFunctions.set(
         varTypeParserName,
         `
-          function ${varTypeParserName} (input, inputPath, coerced, responsePath, errors, ${hasValueName}) {
+          function ${varTypeParserName} (
+            input,
+            inputPath,
+            coerced,
+            responsePath,
+            errors,
+            ${hasValueName},
+            ...indices
+          ) {
             const __inputValue = getPath(input, inputPath);
+
             if (visitedInputValues.has(__inputValue)) {
               errors.push(
                 new GraphQLJITError(
@@ -530,7 +554,8 @@ function compileInputObjectType(
               );
               return;
             }
-            if (__inputValue != null) {
+
+            if (isObject(__inputValue)) {
               visitedInputValues.add(__inputValue);
             }
 
